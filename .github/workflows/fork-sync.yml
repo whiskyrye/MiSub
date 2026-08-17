@@ -76,3 +76,9 @@ jobs:
           git reset --hard upstream/main
           git push --force-with-lease origin main
           echo "✅ Fork main 已镜像到上游 main。"
+      - name: Delete releases and workflows runs
+        uses: ophub/delete-releases-workflows@main
+        with:
+          delete_workflows: true
+          workflows_keep_day: 15
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
