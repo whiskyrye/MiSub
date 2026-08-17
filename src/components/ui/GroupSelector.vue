@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
+import { t } from '@/i18n/index.js';
 
 const props = defineProps({
   modelValue: {
@@ -12,7 +13,7 @@ const props = defineProps({
   },
   placeholder: {
     type: String,
-    default: '选择或输入分组...'
+    default: () => t('common.groupPlaceholder')
   }
 });
 
@@ -22,40 +23,57 @@ const isOpen = ref(false);
 const inputRef = ref(null);
 const containerRef = ref(null);
 const dropdownStyle = ref({ top: '0px', left: '0px', width: '0px' });
+const isTyping = ref(false);
 
-// Filter groups based on input
+const normalizeGroup = (value) => String(value || '').trim();
+const normalizeGroupForCompare = (value) => normalizeGroup(value).toLowerCase();
+const hasExistingGroup = computed(() => {
+  const current = normalizeGroupForCompare(props.modelValue);
+  if (!current) return false;
+  return props.groups.some(group => normalizeGroupForCompare(group) === current);
+});
+
+// Filter groups based on actual typing. Opening dropdown should show all groups.
 const filteredGroups = computed(() => {
-  const query = props.modelValue.toLowerCase();
-  if (!query) return props.groups;
-  return props.groups.filter(g => g.toLowerCase().includes(query));
+  const groups = props.groups.map(normalizeGroup).filter(Boolean);
+  const uniqueGroups = Array.from(new Set(groups));
+  const query = isTyping.value ? normalizeGroupForCompare(props.modelValue) : '';
+  if (!query) return uniqueGroups;
+  return uniqueGroups.filter(group => group.toLowerCase().includes(query));
 });
 
 const updatePosition = () => {
   if (inputRef.value) {
     const rect = inputRef.value.getBoundingClientRect();
+    const isInsideModal = Boolean(containerRef.value?.closest('[role="dialog"][aria-modal="true"]'));
     dropdownStyle.value = {
       top: `${rect.bottom + window.scrollY + 4}px`,
       left: `${rect.left + window.scrollX}px`,
-      width: `${rect.width}px`
+      width: `${rect.width}px`,
+      zIndex: isInsideModal ? 'var(--z-modal-popover)' : 'var(--z-popover)'
     };
   }
 };
 
 const handleInput = (e) => {
+  isTyping.value = true;
   emit('update:modelValue', e.target.value);
   isOpen.value = true;
 };
 
 const handleFocus = () => {
+  isTyping.value = false;
   isOpen.value = true;
 };
 
 const selectGroup = (group) => {
-  emit('update:modelValue', group);
+  emit('update:modelValue', normalizeGroup(group));
+  isTyping.value = false;
   isOpen.value = false;
 };
 
 const toggleDropdown = () => {
+  isTyping.value = false;
   isOpen.value = !isOpen.value;
 };
 
@@ -124,6 +142,7 @@ onUnmounted(() => {
       
       <!-- Arrow Icon -->
       <div 
+        data-testid="group-selector-toggle"
         class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 cursor-pointer transition-transform duration-200 hover:text-gray-600 dark:hover:text-gray-300" 
         :class="{ 'rotate-180': isOpen }"
         @click.stop="toggleDropdown"
@@ -147,15 +166,15 @@ onUnmounted(() => {
         <div
           v-if="isOpen && (groups.length > 0 || modelValue)"
           id="group-selector-dropdown"
-          class="absolute z-[9999] bg-white dark:bg-gray-800 misub-radius-lg shadow-lg border border-gray-100 dark:border-gray-700 max-h-60 overflow-auto py-1 custom-scrollbar"
+          class="absolute bg-white dark:bg-gray-800 misub-radius-lg shadow-lg border border-gray-100 dark:border-gray-700 max-h-60 overflow-auto py-1 custom-scrollbar"
           :style="dropdownStyle"
         >
           <button
-            v-if="modelValue && !groups.some(g => g.toLowerCase() === modelValue.toLowerCase())" 
+            v-if="normalizeGroup(modelValue) && !hasExistingGroup"
             class="w-full text-left pl-10 pr-4 py-2 text-sm text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700/50 block transition-colors"
             @click="selectGroup(modelValue)"
           >
-            创建新分组 "{{ modelValue }}"
+            {{ t('common.createGroup', { name: modelValue }) }}
           </button>
           <button
             v-for="group in filteredGroups"

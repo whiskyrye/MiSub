@@ -1,6 +1,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue';
 import { useToastStore } from '../../stores/toast.js';
+import { useI18n } from '../../i18n/index.js';
 import Modal from '../forms/Modal.vue';
 import EditForm from './SubscriptionEditModal/EditForm.vue';
 import RuleSection from './SubscriptionEditModal/RuleSection.vue';
@@ -13,6 +14,7 @@ const props = defineProps({
 
 const emit = defineEmits(['update:show', 'confirm']);
 const { showToast } = useToastStore();
+const { t } = useI18n();
 
 
 // === 可视化规则编辑器 ===
@@ -66,8 +68,13 @@ const toggleTag = (tag, type) => {
   if (index !== -1) {
     selectedRules.value.splice(index, 1);
   } else {
+        // 统一转成最小化协议标签，供传统文本过滤引擎识别
+    const normalizedPattern = type === 'protocol' && !String(tag.pattern).toLowerCase().startsWith('proto:')
+      ? `proto:${String(tag.pattern).toLowerCase()}`
+      : tag.pattern;
     selectedRules.value.push({
       ...tag,
+      pattern: normalizedPattern,
       type // 'region' | 'protocol' | 'keyword' | 'custom'
     });
   }
@@ -81,7 +88,7 @@ const addCustomKeyword = () => {
 
   // 检查是否已存在
   if (selectedRules.value.some(rule => rule.pattern === keyword || rule.label === keyword)) {
-    showToast('该关键字已添加', 'warning');
+    showToast(t('subscriptions.duplicateKeyword'), 'warning');
     return;
   }
 
@@ -104,15 +111,13 @@ const removeRule = (index) => {
 const syncToText = () => {
   if (!props.editingSubscription) return;
 
-  const rules = selectedRules.value.map(rule => {
-    if (ruleMode.value === 'keep') {
-      return rule.pattern.startsWith('proto:')
-        ? `keep:${rule.pattern}`
-        : `keep:${rule.pattern}`;
-    }
-    return rule.pattern;
-  });
+  if (ruleMode.value === 'keep') {
+    const keepRules = selectedRules.value.map(rule => `keep:${rule.pattern}`);
+    props.editingSubscription.exclude = keepRules.length > 0 ? keepRules.join('\n') : '';
+    return;
+  }
 
+  const rules = selectedRules.value.map(rule => rule.pattern);
   props.editingSubscription.exclude = rules.join('\n');
 };
 
@@ -143,6 +148,13 @@ const parseFromText = () => {
     let pattern = line;
     if (pattern.toLowerCase().startsWith('keep:')) {
       pattern = pattern.substring(5).trim();
+    }
+
+    // 兼容历史保存的纯 proto:xxx 规则：可视化协议标签必须能正确回显
+    const protocolPreset = presetProtocols.find(p => p.pattern.toLowerCase() === pattern.toLowerCase());
+    if (protocolPreset) {
+      selectedRules.value.push({ ...protocolPreset, type: 'protocol' });
+      return;
     }
 
     // 尝试匹配预设标签
@@ -195,18 +207,18 @@ const excludeRuleState = computed(() => {
   const hasDivider = dividerIndex !== -1;
   const hasKeepPrefix = lines.some(line => line.toLowerCase().startsWith('keep:'));
 
-  let tag = '未设置';
+  let tagKey = 'unset';
   if (hasContent) {
-    if (hasDivider) tag = '混合';
-    else if (hasKeepPrefix) tag = '仅包含';
-    else tag = '排除';
+    if (hasDivider) tagKey = 'mixed';
+    else if (hasKeepPrefix) tagKey = 'keepOnly';
+    else tagKey = 'exclude';
   }
 
   const tagClassMap = {
-    '未设置': 'bg-gray-100 text-gray-600 dark:bg-gray-700/50 dark:text-gray-300',
-    '排除': 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-200',
-    '仅包含': 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-200',
-    '混合': 'bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-200'
+    unset: 'bg-gray-100 text-gray-600 dark:bg-gray-700/50 dark:text-gray-300',
+    exclude: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-200',
+    keepOnly: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-200',
+    mixed: 'bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-200'
   };
 
   const errors = [];
@@ -218,7 +230,7 @@ const excludeRuleState = computed(() => {
     if (line.toLowerCase().startsWith('keep:')) {
       line = line.substring('keep:'.length).trim();
       if (!line) {
-        errors.push({ line: index + 1, message: 'keep: 后内容为空' });
+        errors.push({ line: index + 1, message: t('subscriptions.keepEmptyError') });
         return;
       }
     }
@@ -229,7 +241,7 @@ const excludeRuleState = computed(() => {
         .map(p => p.trim())
         .filter(Boolean);
       if (protocols.length === 0) {
-        errors.push({ line: index + 1, message: 'proto: 后未填写协议' });
+        errors.push({ line: index + 1, message: t('subscriptions.protoEmptyError') });
       }
       return;
     }
@@ -237,15 +249,16 @@ const excludeRuleState = computed(() => {
     try {
       new RegExp(line);
     } catch (e) {
-      errors.push({ line: index + 1, message: '正则无效' });
+      errors.push({ line: index + 1, message: t('subscriptions.regexInvalid') });
     }
   });
 
   return {
-    tag,
-    tagClass: tagClassMap[tag] || tagClassMap['未设置'],
+    tagKey,
+    tag: t(`subscriptions.ruleTag.${tagKey}`),
+    tagClass: tagClassMap[tagKey] || tagClassMap.unset,
     errors,
-    errorsText: errors.map(item => `第${item.line}行：${item.message}`).join('；')
+    errorsText: errors.map(item => t('subscriptions.ruleLineError', { line: item.line, message: item.message })).join('；')
   };
 });
 
@@ -263,7 +276,7 @@ const syncExcludeRuleScroll = () => {
 
 const handleConfirm = () => {
   if (isAdvancedMode.value && excludeRuleState.value.errors.length > 0) {
-    showToast('包含/排除规则有误，请先修正', 'error');
+    showToast(t('subscriptions.ruleErrorFixFirst'), 'error');
     return;
   }
   emit('confirm');
@@ -283,7 +296,7 @@ const switchToVisual = () => {
 
 <template>
   <Modal v-if="editingSubscription" :show="show" size="2xl"
-    :confirm-disabled="isAdvancedMode && excludeRuleState.errors.length > 0" confirm-button-title="请先修正规则"
+    :confirm-disabled="isAdvancedMode && excludeRuleState.errors.length > 0" :confirm-button-title="t('subscriptions.fixRulesFirst')"
     @update:show="emit('update:show', $event)" @confirm="handleConfirm">
     <template #title>
       <div class="flex items-center gap-3">
@@ -293,9 +306,12 @@ const switchToVisual = () => {
             <path stroke-linecap="round" stroke-linejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
           </svg>
         </div>
-        <h3 class="text-lg font-bold text-gray-800 dark:text-white">
-          {{ isNew ? '新增订阅' : '编辑订阅' }}
-        </h3>
+        <div>
+          <h3 class="text-lg font-bold text-gray-800 dark:text-white">
+            {{ isNew ? t('subscriptions.addTitle') : t('subscriptions.editTitle') }}
+          </h3>
+          <p class="mt-0.5 text-sm text-gray-500 dark:text-gray-400">{{ t('subscriptions.modalDescription') }}</p>
+        </div>
       </div>
     </template>
     <template #body>

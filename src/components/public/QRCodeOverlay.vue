@@ -1,4 +1,6 @@
 <script setup>
+import { useBackdropDismiss } from '../../composables/useBackdropDismiss.js';
+
 const props = defineProps({
   profile: {
     type: Object,
@@ -11,6 +13,11 @@ const props = defineProps({
 });
 
 const emit = defineEmits(['close', 'download', 'register-canvas']);
+
+const {
+  handleBackdropPointerDown,
+  handleBackdropClick
+} = useBackdropDismiss(() => emit('close'));
 </script>
 
 <template>
@@ -18,8 +25,12 @@ const emit = defineEmits(['close', 'download', 'register-canvas']);
     <Transition name="qr-overlay">
       <div
         v-if="isExpanded"
-        @click.self="emit('close')"
-        class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[100]"
+        @pointerdown.capture="handleBackdropPointerDown"
+        @click.self="handleBackdropClick"
+        class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center"
+        :style="{ zIndex: 'var(--z-modal)' }"
+        role="dialog"
+        aria-modal="true"
       >
         <div class="relative bg-white dark:bg-gray-800 misub-radius-lg p-8 shadow-2xl max-w-sm w-full mx-4 transform transition-all border border-gray-100 dark:border-gray-700"
           @click.stop>

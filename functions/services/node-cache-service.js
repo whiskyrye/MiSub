@@ -10,11 +10,32 @@
  */
 const CACHE_CONFIG = {
     KEY_PREFIX: 'node_cache_',           // 缓存键前缀
-    FRESH_TTL: 0,                        // 新鲜期：0（每次请求都会触发后台刷新）
+    FRESH_TTL: 3 * 60 * 1000,            // 新鲜期：3 分钟（命中时不触发后台刷新）
     STALE_TTL: 60 * 60 * 1000,           // 可用期：1 小时（超过后同步获取）
-    MAX_AGE: 24 * 60 * 60 * 1000,        // 最大缓存时间：24 小时
+    MAX_AGE: 12 * 60 * 60 * 1000,        // 最大缓存时间：12 小时
     BACKGROUND_REFRESH_TIMEOUT: 25000    // 后台刷新超时：25 秒
 };
+
+// A truncated upstream response can still contain a few valid nodes. Protect
+// a previously healthy large cache from being replaced by that partial result.
+const SHRINK_PROTECTION_MIN_CACHED_NODES = 10;
+const SHRINK_PROTECTION_MAX_RATIO = 0.3;
+
+export function isSuspiciousNodeCountDrop(previousCount, nextCount) {
+    const previous = Number(previousCount);
+    const next = Number(nextCount);
+    if (!Number.isFinite(previous) || !Number.isFinite(next)) return false;
+    if (previous < SHRINK_PROTECTION_MIN_CACHED_NODES || next >= previous) return false;
+    return next / previous < SHRINK_PROTECTION_MAX_RATIO;
+}
+
+export function isLikelyPartialAggregateNodeList(nodes) {
+    const lines = String(nodes || '').split(/\r?\n+/).map(line => line.trim()).filter(Boolean);
+    if (lines.length < 2 || lines.length > 3) return false;
+    const hasTrafficNode = lines.some(line => /@127\.0\.0\.1(?::443)?(?:[/?#]|$)/i.test(line));
+    const hasUuidNamedNode = lines.some(line => /^(?:vless|vmess|trojan):\/\/.*#[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:$|[?&])/i.test(line));
+    return hasTrafficNode && hasUuidNamedNode;
+}
 
 /**
  * 生成缓存键
@@ -24,6 +45,14 @@ const CACHE_CONFIG = {
  */
 export function generateCacheKey(type, identifier) {
     return `${CACHE_CONFIG.KEY_PREFIX}${type}_${identifier}`;
+}
+
+function isSubscriptionNodeCacheKey(key) {
+    return typeof key === 'string'
+        && (
+            key.startsWith(`${CACHE_CONFIG.KEY_PREFIX}subscription_`)
+            || key.startsWith(`${CACHE_CONFIG.KEY_PREFIX}subscription_url_`)
+        );
 }
 
 /**
@@ -77,6 +106,23 @@ export async function getCache(storageAdapter, cacheKey) {
 export async function setCache(storageAdapter, cacheKey, nodes, sources = []) {
     try {
         const nodeCount = nodes.split('\n').filter(line => line.trim()).length;
+        if (isLikelyPartialAggregateNodeList(nodes)) {
+            console.warn(`[Cache] Refusing to cache a likely partial aggregate node list for ${cacheKey}`);
+            return false;
+        }
+        const existing = await storageAdapter.get(cacheKey);
+        const existingNodeCount = existing?.nodeCount || String(existing?.nodes || '').split('\n').filter(line => line.trim()).length;
+        if (nodeCount === 0) {
+            if (existingNodeCount > 0) {
+                console.warn(`[Cache] Refusing to overwrite non-empty cache ${cacheKey} with empty node list`);
+                return false;
+            }
+        }
+        if (isSuspiciousNodeCountDrop(existingNodeCount, nodeCount)) {
+            console.warn(`[Cache] Refusing to overwrite cache ${cacheKey} after suspicious node-count drop (${existingNodeCount} -> ${nodeCount})`);
+            return false;
+        }
+
         const cacheEntry = {
             nodes,
             timestamp: Date.now(),
@@ -173,11 +219,17 @@ export async function clearCache(storageAdapter, cacheKey) {
  * @param {Object} storageAdapter - 存储适配器
  * @returns {Promise<{cleared: number, failed: number}>}
  */
-export async function clearAllNodeCaches(storageAdapter) {
+export async function clearAllNodeCaches(storageAdapter, options = {}) {
     try {
         let cleared = 0;
         let failed = 0;
+        let skipped = 0;
         let cursor = null;
+        const preserveKeys = new Set(
+            Array.isArray(options?.preserveKeys)
+                ? options.preserveKeys.filter(isSubscriptionNodeCacheKey)
+                : []
+        );
 
         // 循环处理分页，KV list 默认最多返回 1000 个 key
         do {
@@ -210,6 +262,10 @@ export async function clearAllNodeCaches(storageAdapter) {
             // 删除缓存
             for (const keyInfo of keys) {
                 const key = typeof keyInfo === 'string' ? keyInfo : (keyInfo.name || keyInfo);
+                if (preserveKeys.has(key)) {
+                    skipped++;
+                    continue;
+                }
                 try {
                     if (storageAdapter.kv && typeof storageAdapter.kv.delete === 'function') {
                         await storageAdapter.kv.delete(key);
@@ -229,10 +285,10 @@ export async function clearAllNodeCaches(storageAdapter) {
         } while (cursor);
 
 
-        return { cleared, failed };
+        return { cleared, failed, skipped };
     } catch (error) {
         console.error('[Cache] Failed to clear all caches:', error);
-        return { cleared: 0, failed: 0 };
+        return { cleared: 0, failed: 0, skipped: 0 };
     }
 }
 
